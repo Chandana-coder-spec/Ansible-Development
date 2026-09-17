@@ -171,3 +171,297 @@
         - snow_json_content is defined
       fail_msg: Submit order failed, sys_id missing from response
     delegate_to: localhost
+
+---
+######################################################################################
+# Input for ServiceNow host is taken from survey vars and sets the value for SNOW_Env.
+######################################################################################
+- name: Set ServiceNow host based on survey input
+  ansible.builtin.set_fact:
+    snow_host: "{{ servicenow_host }}"
+######################################################################################
+# This task fetches the sys_id of a REQ based on its number.
+######################################################################################
+- name: Block to prevent playbook failure
+  block:
+    - name: Get REQ sys_id based on REQ number using uri
+      ansible.builtin.uri:
+        url: "{{ snow_host }}/api/now/table/sc_request?sysparm_query=number={{ snow_request_number }}"
+        method: GET
+        user: "{{ snow_username }}"
+        password: "{{ snow_pass }}"
+        force_basic_auth: true
+        validate_certs: false
+        return_content: true
+        status_code: 200
+      register: snow_req_info
+      retries: 5
+      delay: 15
+      until: snow_req_info.status == 200
+
+    - name: Set REQ sys_id
+      ansible.builtin.set_fact:
+        snow_req_sys_id: "{{ snow_req_info.json.result[0].sys_id }}"
+
+    - name: Validate REQ sys id
+      ansible.builtin.assert:
+        that:
+          - snow_req_sys_id is defined
+          - (snow_req_sys_id | default('')) | length > 0
+        fail_msg: REQ sys_id is missing or empty for REQ number {{ snow_request_number }}
+######################################################################################
+# this task retrieves RITM associated with that REQ and stores its number and sys_id.
+######################################################################################
+    - name: Get RITM linked with REQ
+      ansible.builtin.uri:
+        url: "{{ snow_host }}/api/now/table/sc_req_item?sysparm_query=request={{ snow_req_sys_id }}"
+        method: GET
+        user: "{{ snow_username }}"
+        password: "{{ snow_pass }}"
+        force_basic_auth: true
+        validate_certs: false
+        return_content: true
+        status_code: 200
+        timeout: 60
+      register: snow_ritm_info
+      retries: 5
+      delay: 15
+      until: snow_ritm_info.status == 200
+
+    - name: Set RITM numbers and sys_ids
+      ansible.builtin.set_fact:
+        snow_ritm_number: "{{ snow_ritm_info.json.result | map(attribute='number') | first }}"
+        snow_ritm_sys_id: "{{ snow_ritm_info.json.result | map(attribute='sys_id') | first }}"
+
+    - name: Display RITM details
+      ansible.builtin.debug:
+        msg:
+          - "{{ snow_ritm_number }}"
+          - "{{ snow_ritm_sys_id }}"
+
+    - name: Validate RITM
+      ansible.builtin.assert:
+        that:
+          - snow_ritm_number is defined
+          - (snow_ritm_number | default('')) | length > 0
+        fail_msg: RITM number is missing or empty
+
+    - name: Wait 60 seconds before fetching SCTASK number
+      ansible.builtin.wait_for:
+        timeout: 60
+      delegate_to: localhost
+    ######################################################################################
+    # it fetches the associated SCTASK and extracts its number and sys_id.
+    ######################################################################################
+    - name: Get SCTASK linked with RITM
+      ansible.builtin.uri:
+        url: "{{ snow_host }}/api/now/table/sc_task?sysparm_query=request_item={{ snow_ritm_sys_id }}"
+        method: GET
+        user: "{{ snow_username }}"
+        password: "{{ snow_pass }}"
+        force_basic_auth: true
+        validate_certs: false
+        return_content: true
+        status_code: 200
+      register: snow_sctask_info
+      retries: 5
+      delay: 15
+      until: snow_sctask_info.status == 200
+      # - snow_sctask_info.json.result.number != ' ' or 
+      #   snow_sctask_info.json.result.number != " "
+
+    - name: Set SCTASK number and sys id
+      ansible.builtin.set_fact:
+        snow_sctask_number: >-
+          {{
+            (
+              snow_sctask_info.json.result
+              | default([])
+              | first
+              | default({})
+            ).number | default('')
+          }}
+        snow_sctask_sys_id: >-
+          {{
+            (
+              snow_sctask_info.json.result
+              | default([])
+              | first
+              | default({})
+            ).sys_id | default('')
+          }}
+
+    - name: Validate SCTASK
+      ansible.builtin.assert:
+        that:
+          - snow_sctask_sys_id is defined
+          - (snow_sctask_sys_id | default('')) | length > 0
+        fail_msg: SCTASK sys_id is missing or empty
+######################################################################################
+# It retrieves the sys_id of the target assignment group passed in survey vars.
+######################################################################################
+    - name: Get sys_id for assignment group
+      ansible.builtin.uri:
+        url: "{{ snow_host }}/api/now/table/sys_user_group?sysparm_query=name={{
+        snow_assignment_group_for_sctask | urlencode }}"
+        method: GET
+        user: "{{ snow_username }}"
+        password: "{{ snow_pass }}"
+        force_basic_auth: true
+        validate_certs: false
+        return_content: true
+        status_code: 200
+      register: snow_fetch_assign_group_sys_id
+      retries: 5
+      delay: 15
+      until: snow_fetch_assign_group_sys_id.status == 200
+
+    - name: Set assignment group sys id
+      ansible.builtin.set_fact:
+        snow_assignment_group_sys_id: "{{ snow_fetch_assign_group_sys_id.json.result[0].sys_id }}"
+      when: snow_fetch_assign_group_sys_id.json.result | length > 0
+
+    - name: Display assignment group sys id
+      ansible.builtin.debug:
+        var: snow_assignment_group_sys_id
+
+    - name: Validate assignment group
+      ansible.builtin.assert:
+        that:
+          - snow_assignment_group_sys_id is defined
+        fail_msg: Unable to fetch Assignment group sys_id
+######################################################################################
+# It updates the SCTASK's assignment group to value from survey vars and displays the update result.
+######################################################################################
+    - name: Update SCTASK assignment group
+      ansible.builtin.uri:
+        url: "{{ snow_host }}/api/now/table/sc_task/{{ snow_sctask_sys_id }}"
+        method: PATCH
+        user: "{{ snow_username }}"
+        password: "{{ snow_pass }}"
+        force_basic_auth: true
+        validate_certs: false
+        headers:
+          Content-Type: application/json
+        body_format: json
+        body:
+          assignment_group: "{{ snow_assignment_group_for_sctask }}"
+      register: snow_update_result
+      retries: 5
+      delay: 15
+      until: snow_update_result.status == 200
+
+    - name: Update SCTASK short description
+      ansible.builtin.uri:
+        url: "{{ snow_host }}/api/now/table/sc_task/{{ snow_sctask_sys_id }}"
+        method: PATCH
+        url_username: "{{ snow_username }}"
+        url_password: "{{ snow_pass }}"
+        force_basic_auth: true
+        validate_certs: false
+        headers:
+          Content-Type: application/json
+        body_format: json
+        body:
+          short_description: "{{ snow_short_description }}"
+          description: "{{ snow_description }}"
+      delegate_to: localhost
+      register: update_task_info
+      retries: 5
+      delay: 15
+      until: update_task_info.status == 200
+
+    - name: Upload attachment to SCTASK
+      servicenow.itsm.attachment_upload:
+        instance:
+          host: "{{ snow_host }}"
+          username: "{{ snow_username }}"
+          password: "{{ snow_pass }}"
+        table_name: sc_task
+        table_sys_id: "{{ snow_sctask_sys_id }}"
+        attachments:
+          - path: "{{ ciscoguestwifi_report_path }}"
+      delegate_to: localhost
+      register: upload_attachment_info
+      retries: 5
+      delay: 15
+      until: upload_attachment_info.changed == true
+
+    - name: Get SCTASK details
+      ansible.builtin.uri:
+        url: "{{ servicenow_host }}/api/now/table/sc_task/{{ snow_sctask_sys_id }}"
+        method: GET
+        url_username: "{{ snow_username }}"
+        url_password: "{{ snow_pass }}"
+        force_basic_auth: true
+        validate_certs: false
+        return_content: true
+      register: snow_sctask_details
+      retries: 5
+      delay: 15
+      until: snow_sctask_details.status == 200
+
+    - name: Set SCTASK state
+      ansible.builtin.set_fact:
+        snow_sctask_state: "{{ snow_sctask_details.json.result.state }}"
+
+    - name: Update audit status
+      ansible.builtin.set_fact:
+        snow_users_removed_status: >-
+          {{
+            'Completed'
+            if snow_sctask_state == '3'
+            else 'Pending'
+          }}
+
+    - name: Close SCTASK
+      ansible.builtin.uri:
+        url: "{{ servicenow_host }}/api/now/table/sc_task/{{ snow_sctask_sys_id }}"
+        method: PATCH
+        url_username: "{{ snow_username }}"
+        url_password: "{{ snow_pass }}"
+        force_basic_auth: true
+        validate_certs: false
+        headers:
+          Content-Type: application/json
+        body_format: json
+        body:
+          state: "3"
+          close_notes: User removals verified and audit completed by automation.
+      register: close_sctask
+      retries: 5
+      delay: 15
+      until: close_sctask.status == 200
+    
+    - name: Set SCTASK state again
+      ansible.builtin.set_fact:
+        snow_sctask_state: "{{ snow_sctask_details.json.result.state }}"
+
+    - name: Display update result
+      ansible.builtin.debug:
+        var: snow_update_result.json
+
+    - name: Assign assignment group sys id
+      ansible.builtin.set_fact:
+        snow_sys_id_value: "{{ snow_update_result.json.result.assignment_group.value }}"
+
+    - name: Validate assignment group update
+      ansible.builtin.assert:
+        that:
+          - snow_assignment_group_sys_id == snow_sys_id_value
+        fail_msg: Assignment group not updated as expected
+
+  environment:
+    HTTP_PROXY: "http://proxy.admworld.com:80"
+    HTTPS_PROXY: "http://proxy.admworld.com:80"
+    http_proxy: "http://proxy.admworld.com:80"
+    https_proxy: "http://proxy.admworld.com:80"
+    
+  rescue:
+    - name: Capture error details
+      ansible.builtin.set_fact:
+        snow_status_message: "{{ ansible_failed_result.msg }}"
+
+    - name: Display error
+      ansible.builtin.debug:
+        msg: "{{ snow_status_message }}"

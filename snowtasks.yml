@@ -1,1 +1,173 @@
 
+---
+######################################################################################
+# Input for ServiceNow host is taken from survey vars and sets the value for SNOW_Env.
+######################################################################################
+- name: Set ServiceNow host based on survey input
+  ansible.builtin.set_fact:
+    snow_host: "{{ servicenow_host }}"
+    snow_cat_item_name: "{{ snow_cat_item_name }}"
+  delegate_to: localhost
+
+- name: Block to prevent playbook failure
+  block:
+    - name: Assigning variable
+      ansible.builtin.set_fact:
+        snow_base_uri: "{{ snow_host }}/api/now/table/sc_cat_item"
+        snow_query: "sysparm_query=name={{ snow_cat_item_name | urlencode }}\
+          ^active=true&sysparm_fields=sys_id,name&sysparm_limit=1"
+      delegate_to: localhost
+      
+    ######################################################################################
+    # It fetches the current cart ID for the logged-in user
+    ######################################################################################
+
+    - name: Fetching cart id within the logged in user's cart
+      ansible.builtin.uri:
+        url: "{{ snow_host }}/api/sn_sc/servicecatalog/cart"
+        method: GET
+        url_username: "{{ snow_username }}"
+        url_password: "{{ snow_pass }}"
+        validate_certs: false
+        headers:
+          Accept: application/json
+        return_content: true
+        timeout: 60
+      register: snow_get_cart_item
+      retries: 5
+      delay: 15
+      until: snow_get_cart_item.status | default(-1) == 200
+      delegate_to: localhost
+
+    - name: Assigning cart id value to a variable
+      ansible.builtin.set_fact:
+        snow_cart_id: "{{ snow_get_cart_item.json.result.cart_id }}"
+
+    - name: Assert cart ID was successfully fetched
+      ansible.builtin.assert:
+        that:
+          - snow_get_cart_item.json is defined
+          - snow_get_cart_item.json.result is defined
+          - snow_cart_id | length > 0
+        fail_msg: Failed to fetch cart ID for the logged-in user
+      delegate_to: localhost
+    ######################################################################################
+    # It empties the cart if it contains any items.
+    ######################################################################################
+    - name: Emptying cart
+      ansible.builtin.uri:
+        url: "{{ snow_host }}/api/sn_sc/servicecatalog/cart/{{ snow_cart_id }}/empty"
+            # "{{ snow_host }}/api/sn_sc/servicecatalog/items/{{ snow_cat_item_sys_id }}/order_now"
+        method: DELETE
+        url_username: "{{ snow_username }}"
+        url_password: "{{ snow_pass }}"
+        validate_certs: false
+        status_code: 204
+        timeout: 60
+      register: snow_emptying_cart
+      when:
+        - snow_cart_id is defined
+        - snow_cart_id | trim | length > 0
+      retries: 5
+      delay: 15
+      until: snow_emptying_cart.status | default(-1) == 204
+      delegate_to: localhost
+    ######################################################################################
+    # It adds catalog item to the cart with required variables, including requestor and description.
+    ######################################################################################
+    - name: Add to cart
+      ansible.builtin.uri:
+        url: "{{ snow_host }}/api/sn_sc/servicecatalog/items/{{ snow_cat_item_sys_id }}/add_to_cart"
+        # "{{ snow_host }}/api/sn_sc/servicecatalog/items/{{ snow_cat_item_sys_id }}/order_now"
+        method: POST
+        url_username: "{{ snow_username }}"
+        url_password: "{{ snow_pass }}"
+        force_basic_auth: true
+        validate_certs: false
+        headers:
+          Accept: application/json
+          Content-Type: application/json
+        body:
+          cat_item: "{{ snow_cat_item_sys_id }}"
+          sysparm_quantity: 1
+          "variables": {
+            "requestor": "{{ snow_generic_requestor_sys_id }}",
+            "description": "{{ snow_generic_request_description }}"}
+        body_format: json
+        return_content: true
+        timeout: 30
+      register: snow_add_to_cart_response
+      retries: 5
+      delay: 15
+      until: snow_add_to_cart_response.status | default(-1) == 200
+      delegate_to: localhost
+    # - set_fact:
+    #     snow_cart_id: "0c802c658795f298202831983cbb353d"
+
+######################################################################################
+# It submits the order from the cart and displays the order submission response.
+######################################################################################
+    - name: Submitting order from cart(checkout)
+      ansible.builtin.uri:
+        url: "{{ snow_host }}/api/sn_sc/servicecatalog/cart/submit_order"
+        # "{{ snow_host }}/api/sn_sc/servicecatalog/cart/{{ snow_cart_id }}/checkout"
+        method: POST
+        url_username: "{{ snow_username }}"
+        url_password: "{{ snow_pass }}"
+        force_basic_auth: true
+        validate_certs: false
+        headers:
+          Accept: application/json
+          Content-Type: application/json
+        return_content: true
+        timeout: 30
+      register: snow_submit_order
+      retries: 5
+      delay: 15
+      until: snow_submit_order.status | default(-1) == 200
+      delegate_to: localhost
+
+    - name: Display register response
+      ansible.builtin.debug:
+        msg: "{{ snow_submit_order }}"
+      delegate_to: localhost
+
+    - name: Assigning value to variable
+      ansible.builtin.set_fact:
+        snow_json_content: "{{ snow_submit_order.content | from_json }}"
+      delegate_to: localhost
+
+    - name: Save request details
+      ansible.builtin.set_fact:
+        snow_request_number: "{{ snow_json_content.result.request_number }}"
+        snow_request_id: "{{ snow_json_content.result.request_id }}"
+      delegate_to: localhost
+
+  environment:
+    HTTP_PROXY: "http://proxy.admworld.com:80"
+    HTTPS_PROXY: "http://proxy.admworld.com:80"
+    http_proxy: "http://proxy.admworld.com:80"
+    https_proxy: "http://proxy.admworld.com:80"
+
+  rescue:
+  - name: Capture error details
+    ansible.builtin.set_fact:
+      snow_status_message: "{{ ansible_failed_result.msg }}"
+    delegate_to: localhost
+    
+  - name: Display Message
+    ansible.builtin.debug:
+      msg: "{{ snow_status_message }}"
+    delegate_to: localhost
+    
+  - name: Display request number
+    ansible.builtin.debug:
+      msg: "Request Number: {{ snow_json_content.result.request_number }}"
+    delegate_to: localhost
+  
+  - name: Assert order submission was successful
+    ansible.builtin.assert:
+      that:
+        - snow_json_content is defined
+      fail_msg: Submit order failed, sys_id missing from response
+    delegate_to: localhost

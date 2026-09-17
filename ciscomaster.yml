@@ -1,0 +1,132 @@
+---
+- name: GuestWifi User Deletion
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Including the guestwifi role
+      ansible.builtin.import_role:
+        name: ciscoguestwifi
+
+    - name: Create ServiceNow Request
+      ansible.builtin.import_role:
+        name: snow
+        tasks_from: Create_Generic_Service_Request
+      vars:
+        snow_generic_request_description: |
+          Guest WiFi cleanup completed.
+
+          Users Removed: {{ ciscoguestwifi_user_ids | length }}
+
+          Removed Users:
+          {{ ciscoguestwifi_removed_users_text }}
+
+        snow_catalog_item_name: "{{ snow_catalog_item_name }}"
+        snow_generic_request_requestor: "{{ snow_generic_request_requestor }}"
+      #when: ciscoguestwifi_users_removed
+      delegate_to: localhost
+
+    ####################################################################
+    # Update Assignment Group
+    ####################################################################
+
+    - name: Change Assignment Group
+      ansible.builtin.import_role:
+        name: snow
+        tasks_from: Change_Assignment_Group_of_SCTASK
+      vars:
+        snow_short_description: "Guest wifi disabled users deletion | Ansible | Job ID: {{ tower_job_id }}"
+        snow_description: |
+          Users removed from Cisco ISE.
+
+          Total Removed Users: {{ ciscoguestwifi_user_ids | length }}
+
+          Removed Users:
+          {{ ciscoguestwifi_removed_users_text }}
+
+          Triggered by Ansible Job ID: {{ tower_job_id }}
+
+        snow_assignment_group: "{{ snow_assignment_group_for_sctask }}"
+      when: ciscoguestwifi_users_removed
+      delegate_to: localhost
+
+    - name: Send Email Notification
+      community.general.mail:
+        host: "{{ smtp_host }}"
+        port: "{{ smtp_port }}"
+        from: "{{ from_address }}"
+        to: "{{ to_address }}"
+        subject: "Guest WiFi Disabled Users Deletion Report |No Users Removed | Job ID: {{ tower_job_id }}"
+        subtype: html
+        body: |
+          <html>
+          <body>
+
+          <p>Hi Team,</p
+
+          <p>
+          Ansible job executed successfully <b>no Users removed.</b>
+          </p>
+          <p>
+          This is an auto-generated email from Ansible Automation Platform.
+          Please do not reply.
+          </p>
+
+          <p>
+          Thanks & Regards,<br>
+          CFS Automation Team
+          </p>
+
+          </body>
+          </html>
+      when: ciscoguestwifi_user_ids | length == 0
+      delegate_to: localhost
+
+    - name: Send Email Notification
+      community.general.mail:
+        host: "{{ smtp_host }}"
+        port: "{{ smtp_port }}"
+        from: "{{ from_address }}"
+        to: "{{ to_address }}"
+        subject: "Guest WiFi Disabled Users Deletion Report | Job ID: {{ tower_job_id }}"
+        subtype: html
+        attach:
+          - "{{ ciscoguestwifi_report_path }}"
+        body: |
+          <html>
+          <body>
+
+          <p>Hi Team,</p>
+
+          <p>
+          Users removed successfully. A ticket {{ snow_request_number }} was submitted
+          and task number is {{ snow_sctask_number }}.
+          </p>
+
+          <p>
+          <b>Users Removed:</b> {{ ciscoguestwifi_user_ids | length }}
+          </p>
+
+          <p>
+          <b>Removed User List:</b>
+          </p>
+
+          <pre>{{ ciscoguestwifi_removed_users_text }}</pre>
+
+          <p>
+          CSV report is attached for reference.
+          </p>
+
+          <p>
+          This is an auto-generated email from Ansible Automation Platform.
+          Please do not reply.
+          </p>
+
+          <p>
+          Thanks & Regards,<br>
+          CFS Automation Team
+          </p>
+
+          </body>
+          </html>
+      when: ciscoguestwifi_users_removed
+      delegate_to: localhost

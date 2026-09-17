@@ -1,1 +1,108 @@
 
+---
+- name: Get disabled users from Cisco ISE
+  ansible.builtin.uri:
+    url: https://{{ ise_host }}:9060/ers/config/internaluser/?filter=enabled.EQ.Disabled
+    method: GET
+    user: "{{ ise_user }}"
+    password: "{{ ise_password }}"
+    force_basic_auth: true
+    validate_certs: false
+    headers:
+      Accept: application/json
+  register: ciscoguestwifi_disabled_users
+  retries: 5
+  delay: 30
+  until: ciscoguestwifi_disabled_users.status | default(-1) == 200
+  delegate_to: localhost
+
+- name: Extract user IDs
+  ansible.builtin.set_fact:
+    ciscoguestwifi_user_ids: >-
+      {{
+        ciscoguestwifi_disabled_users.json.SearchResult.resources
+        | default([])
+        | map(attribute='id')
+        | list
+      }}
+
+- name: End play if no disabled users found
+  ansible.builtin.meta: end_play
+  when: ciscoguestwifi_user_ids | length == 0
+
+- name: Get details for each disabled user
+  ansible.builtin.uri:
+    url: https://{{ ise_host }}:9060/ers/config/internaluser/{{ item }}
+    method: GET
+    user: "{{ ise_user }}"
+    password: "{{ ise_password }}"
+    force_basic_auth: true
+    validate_certs: false
+    headers:
+      Accept: application/json
+  loop: "{{ ciscoguestwifi_user_ids }}"
+  register: ciscoguestwifi_user_details
+  retries: 5
+  delay: 30
+  until: ciscoguestwifi_user_details.status | default(-1) == 200
+  delegate_to: localhost
+  run_once: true
+
+- name: Build report data
+  ansible.builtin.set_fact:
+    ciscoguestwifi_guest_users: >-
+      {{
+        ciscoguestwifi_guest_users | default([])
+        +
+        [{
+          'UserId': item.json.InternalUser.id,
+          'UserName': item.json.InternalUser.name,
+          'EnabledState': item.json.InternalUser.enabled,
+          'IdentityGroups': item.json.InternalUser.identityGroups,
+          'ExpiryDate': item.json.InternalUser.expiryDate
+        }]
+      }}
+  loop: "{{ ciscoguestwifi_user_details.results }}"
+
+- name: Build removed users list for ticket/email
+  ansible.builtin.set_fact:
+    ciscoguestwifi_removed_users_text: |
+      {% for user in ciscoguestwifi_guest_users %}
+      {{ user.UserName }}
+      {% endfor %}
+
+- name: Set report path
+  ansible.builtin.set_fact:
+    ciscoguestwifi_report_path: /tmp/GuestWifiUsers.csv
+
+- name: Create CSV report
+  ansible.builtin.copy:
+    dest: "{{ ciscoguestwifi_report_path }}"
+    mode: "0777"
+    content: |
+      UserId,UserName,EnabledState,IdentityGroups,ExpiryDate
+      {% for user in ciscoguestwifi_guest_users %}
+      {{ user.UserId }},{{ user.UserName }},{{ user.EnabledState }},{{ user.IdentityGroups }},{{ user.ExpiryDate }}
+      {% endfor %}
+  register: ciscoguestwifi_csv_report
+  delegate_to: localhost
+
+- name: Delete disabled users from Cisco ISE
+  ansible.builtin.uri:
+    url: https://{{ ise_host }}:9060/ers/config/internaluser/{{ item }}
+    method: DELETE
+    user: "{{ ise_user }}"
+    password: "{{ ise_password }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 204
+    headers:
+      Accept: application/json
+      Content-Type: application/json
+  loop: "{{ ciscoguestwifi_user_ids }}"
+  register: ciscoguestwifi_delete_results
+  delegate_to: localhost
+
+- name: Set users removed flag
+  ansible.builtin.set_fact:
+    ciscoguestwifi_users_removed: true
